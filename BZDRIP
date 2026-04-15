@@ -1,1 +1,205 @@
 BZDRIP 
+
+
+package com.bzdrip.vip;
+
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.os.Build;
+import android.os.IBinder;
+import android.view.Gravity;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.*;
+
+import com.google.firebase.remoteconfig.FirebaseRemoteConfig;
+
+public class FloatingMenuService extends Service {
+
+    private WindowManager windowManager;
+    private WindowManager.LayoutParams menuParams, fovParams;
+    private View floatingView;
+    private FovView drawingView; // La vista que dibuja el círculo
+    private FirebaseRemoteConfig mFirebase;
+    
+    // UI Elements
+    private LinearLayout layoutLogin, layoutHacks;
+    private EditText etKey;
+    private Button btnLogin, btnClose;
+    private Switch swAwm;
+    private SeekBar sbFov;
+    private TextView tvFovValue;
+    
+    // Estado
+    private int currentFovRadius = 100;
+    private boolean isFovVisible = false;
+
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        mFirebase = FirebaseRemoteConfig.getInstance();
+        
+        // 1. Configurar WindowManager
+        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+
+        // 2. Inicializar el Círculo Visual (Invisible al inicio)
+        initFovDrawing();
+
+        // 3. Inicializar Menú Flotante
+        initFloatingMenu();
+    }
+
+    // --- CÍRCULO VISUAL (CAPA DE DIBUJO) ---
+    private void initFovDrawing() {
+        drawingView = new FovView(this);
+
+        int layoutType = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+
+        fovParams = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT, // Toda la pantalla
+                WindowManager.LayoutParams.MATCH_PARENT,
+                layoutType,
+                // FLAG_NOT_FOCUSABLE y NOT_TOUCHABLE para que no interfiera con el juego
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT // Fondo transparente
+        );
+        fovParams.gravity = Gravity.CENTER;
+        
+        // Lo añadimos, pero su onDraw lo mantendrá oculto si isFovVisible es false
+        windowManager.addView(drawingView, fovParams);
+    }
+
+    // Clase interna que dibuja el círculo
+    private class FovView extends View {
+        private Paint paint;
+
+        public FovView(Context context) {
+            super(context);
+            paint = new Paint();
+            paint.setStyle(Paint.Style.STROKE); // Solo borde
+            paint.setStrokeWidth(3.0f);
+            paint.setAntiAlias(true);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            
+            // Solo dibujar si está activado y hay un radio válido
+            if (isFovVisible && currentFovRadius > 0) {
+                // Color del círculo (puedes sacarlo de Firebase también)
+                paint.setColor(Color.CYAN); 
+                
+                // Dibujar en el centro de la pantalla
+                canvas.drawCircle(getWidth() / 2, getHeight() / 2, currentFovRadius, paint);
+            }
+        }
+    }
+
+    // --- MENÚ FLOTANTE (PANEL DE CONTROL) ---
+    private void initFloatingMenu() {
+        floatingView = View.inflate(this, R.layout.bzdrip_menu, null);
+
+        int layoutType = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+
+        menuParams = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                layoutType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+        );
+        menuParams.gravity = Gravity.TOP | Gravity.START;
+        menuParams.x = 100; menuParams.y = 100;
+
+        windowManager.addView(floatingView, menuParams);
+
+        // Vincular componentes (Login y Cerrar ya estaban)
+        layoutLogin = floatingView.findViewById(R.id.layout_login);
+        layoutHacks = floatingView.findViewById(R.id.layout_hacks);
+        etKey = floatingView.findViewById(R.id.et_key_ingreso);
+        btnLogin = floatingView.findViewById(R.id.btn_verificar);
+        btnClose = floatingView.findViewById(R.id.btn_close_menu);
+
+        // Nuevos componentes de FOV (Asumiendo que los pusiste en el XML como el paso anterior)
+        sbFov = floatingView.findViewById(R.id.sb_aim_fov);
+        tvFovValue = floatingView.findViewById(R.id.tv_fov_val);
+
+        layoutHacks.setVisibility(View.GONE);
+        layoutLogin.setVisibility(View.VISIBLE);
+
+        btnLogin.setOnClickListener(v -> validarAcceso());
+        btnClose.setOnClickListener(v -> stopSelf());
+
+        setupHacksLogic();
+    }
+
+    private void validarAcceso() {
+        String keyIngresada = etKey.getText().toString().trim();
+        mFirebase.fetchAndActivate().addOnCompleteListener(task -> {
+            if (task.isSuccessful()) {
+                String keyVipValida = mFirebase.getString("key_vip_activa");
+                if (keyIngresada.equals(keyVipValida)) {
+                    Toast.makeText(this, "✅ VIP", Toast.LENGTH_SHORT).show();
+                    layoutLogin.setVisibility(View.GONE);
+                    layoutHacks.setVisibility(View.VISIBLE);
+                    
+                    // Al loguear con éxito, configurar el máximo del SeekBar
+                    long fovMax = mFirebase.getLong("max_fov_allowed");
+                    sbFov.setMax((int) fovMax);
+                } else {
+                    Toast.makeText(this, "❌ Key Incorrecta", Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+    }
+
+    private void setupHacksLogic() {
+        // --- Lógica del SeekBar para FOV ---
+        sbFov.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                currentFovRadius = progress;
+                tvFovValue.setText("Radio FOV: " + progress);
+                
+                // Forzar a la capa de dibujo a redibujarse inmediatamente
+                drawingView.invalidate(); 
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                // Cuando el usuario empieza a tocar la barra, mostrar el círculo
+                isFovVisible = true;
+                drawingView.invalidate();
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                // Cuando el usuario suelta la barra, ocultar el círculo (opcional)
+                // isFovVisible = false; // Descomenta esto si quieres que se oculte al soltar
+                // drawingView.invalidate();
+                Toast.makeText(FloatingMenuService.this, "FOV: " + currentFovRadius, Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        // Importante: Eliminar AMBAS vistas para evitar leaks
+        if (floatingView != null) windowManager.removeView(floatingView);
+        if (drawingView != null) windowManager.removeView(drawingView);
+    }
+}
